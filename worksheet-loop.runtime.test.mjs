@@ -1,7 +1,7 @@
 // Runtime smoke test: exercises the real watch → debounce → steer loop, the
 // bash wildcard guard, and disarm-time hash behavior in a temp directory.
 // Run: node worksheet-loop.runtime.test.mjs (or npm test) — requires Node >= 22.7.
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, existsSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, existsSync, realpathSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,14 +89,17 @@ try {
 
   // 2. Agent write via the `write` tool: armed → write → disarm; no steer,
   //    an actor:"agent" revision is recorded, and the spurious post-write
-  //    watch event is hash-suppressed.  The tool input uses the CANONICAL
-  //    (symlink-resolved) path form while attach used the raw one — the guard
-  //    must arm despite the form mismatch (macOS /var vs /private/var).
+  //    watch event is hash-suppressed.  The tool input uses a SYMLINKED
+  //    path form — a different string that resolves to the same file while
+  //    attach used the raw one.  This reproduces the macOS /var vs
+  //    /private/var form-mismatch case deterministically on every platform
+  //    (a bare tmpdir is not symlinked on Linux, so we create the link).
   const agentContent = "# Test\n\n## Todos\n- [x] step one\n\n## Progress\n- did the thing\n- agent note\n";
-  const canonicalWs = realpathSync(wsPath);
-  assert(canonicalWs !== wsPath, "test requires a symlinked workdir (tmpdir)");
+  const wsLink = path.join(workdir, "ws-link.md");
+  symlinkSync(wsPath, wsLink);
+  assert(realpathSync(wsLink) !== wsLink, "symlinked path must resolve to a different form");
   handlers.get("tool_call")(
-    { toolName: "write", toolCallId: "w1", input: { path: canonicalWs, content: agentContent } },
+    { toolName: "write", toolCallId: "w1", input: { path: wsLink, content: agentContent } },
     baseCtx,
   );
   writeFileSync(wsPath, agentContent);
