@@ -18,6 +18,17 @@ For one-off development, load the source without installing:
 pi -e /path/to/pi-worksheet-loop/index.ts
 ```
 
+## Releasing
+
+1. Bump `version` in `package.json` (e.g. `0.2.0`) and commit.
+2. Set the `NPM_TOKEN` repository secret (GitHub can auto-create it because
+   the npm account is linked to GitHub: repo → Settings → Secrets and
+   variables → Actions).
+3. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+CI runs the full gate (typecheck + tests) and publishes to npm only when the
+tag matches the package version exactly.
+
 ## Commands
 
 - `/worksheet start <slug>` — create and select a project worksheet
