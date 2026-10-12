@@ -136,14 +136,44 @@ try {
   await sleep(DEBOUNCE_SETTLE_MS);
   assert(steers.length === 3, "post-disarm human edit steers again");
 
+  // 4b. Parallel write race: two write tool calls for the SAME worksheet in
+  //     one batch (pi's default toolExecution is "parallel").  The first
+  //     tool_execution_end must NOT clear the guard while the second write is
+  //     still in flight — otherwise the watcher sees the in-flight agent
+  //     write with no guard active and attributes it to the human (plus a
+  //     self-steer).
+  const before = readFileSync(wsPath, "utf8");
+  const parallelNote = before + "- agent parallel note\n";
+  handlers.get("tool_call")(
+    { toolName: "write", toolCallId: "w3", input: { path: wsPath, content: before } },
+    baseCtx,
+  );
+  handlers.get("tool_call")(
+    { toolName: "write", toolCallId: "w4", input: { path: wsPath, content: parallelNote } },
+    baseCtx,
+  );
+  writeFileSync(wsPath, before); // w3 lands first
+  handlers.get("tool_execution_end")({ toolName: "write", toolCallId: "w3", result: {}, isError: false }, baseCtx);
+  writeFileSync(wsPath, parallelNote); // w4 lands later, end event still pending
+  await sleep(DEBOUNCE_SETTLE_MS); // let any (incorrect) human debounce timer fire
+  handlers.get("tool_execution_end")({ toolName: "write", toolCallId: "w4", result: {}, isError: false }, baseCtx);
+  await sleep(DEBOUNCE_SETTLE_MS);
+  const afterParallel = actorRevisions(wsPath);
+  assert(
+    afterParallel.human === 2,
+    `parallel in-flight write must not be attributed to the human (got ${afterParallel.human} human revisions)`,
+  );
+  assert(afterParallel.agent === 3, `parallel write recorded as an agent revision (got ${afterParallel.agent})`);
+  assert(steers.length === 3, "parallel in-flight write produces no steer");
+
   // 5. Shutdown tears down watchers and timers so the process can exit.
   handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, baseCtx);
 
-  // 6. Final attribution: 2 agent revisions (write + interleave) and >=2 human
-  //    revisions (step-1 edit + post-bash edit).
+  // 6. Final attribution: 3 agent revisions (write + interleave + parallel)
+  //    and exactly 2 human revisions (step-1 edit + post-bash edit).
   const final = actorRevisions(wsPath);
-  assert(final.agent === 2, `expected 2 agent revisions (got ${final.agent})`);
-  assert(final.human >= 2, `expected >=2 human revisions (got ${final.human})`);
+  assert(final.agent === 3, `expected 3 agent revisions (got ${final.agent})`);
+  assert(final.human === 2, `expected exactly 2 human revisions (got ${final.human})`);
 } finally {
   process.chdir(originalCwd);
   rmSync(workdir, { recursive: true, force: true });

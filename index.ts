@@ -535,11 +535,16 @@ export default function (pi: ExtensionAPI) {
   function saveBlockRecords(filePath: string, blocks: BlockRecord[]): void {
     try {
       fs.mkdirSync(historyDirFor(filePath), { recursive: true });
+      // Atomic replace: a crash mid-write must not leave a truncated JSON
+      // file, which would wipe persisted block identities on next load.
+      const target = blockIdsPathFor(filePath);
+      const tmp = `${target}.tmp`;
       fs.writeFileSync(
-        blockIdsPathFor(filePath),
+        tmp,
         JSON.stringify({ version: 1, blocks }, null, 2),
         "utf-8",
       );
+      fs.renameSync(tmp, target);
     } catch {
       // storage is best-effort
     }
@@ -745,10 +750,21 @@ export default function (pi: ExtensionAPI) {
   }
 
   const worksheetGuard = {
-    paths: new Set<string>(),
+    // Reference-counted per key: pi's default tool execution is PARALLEL, so
+    // a batch can hold several in-flight arms on the same path. The first
+    // tool_execution_end must not clear the guard while a sibling write is
+    // still landing — that is what made in-flight agent writes visible to
+    // the watcher and misattributable to the human.
+    counts: new Map<string, number>(),
     timers: new Map<string, ReturnType<typeof setTimeout>>(),
+    armedPaths(): Set<string> {
+      return new Set(this.counts.keys());
+    },
     isActiveFor(targetPath: string): boolean {
-      return this.paths.has(ANY_WORKSHEET) || this.paths.has(canonicalPath(targetPath));
+      return (
+        (this.counts.get(ANY_WORKSHEET) ?? 0) > 0 ||
+        (this.counts.get(canonicalPath(targetPath)) ?? 0) > 0
+      );
     },
     arm(targetPath: string) {
       const normalizedPath = canonicalPath(targetPath);
@@ -766,26 +782,42 @@ export default function (pi: ExtensionAPI) {
       this.clearArmed(ANY_WORKSHEET);
     },
     setArmed(key: string, staleMs: number) {
-      this.paths.add(key);
+      this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
       const previousTimer = this.timers.get(key);
       if (previousTimer) clearTimeout(previousTimer);
-      this.timers.set(key, setTimeout(() => {
-        this.clearArmed(key);
-      }, staleMs));
-      writeWorksheetSentinel(this.paths);
+      // Crash timer: an end event that never arrives releases the whole key
+      // after staleMs (matching the sentinel's external stale expiry).
+      this.timers.set(
+        key,
+        setTimeout(() => {
+          this.counts.delete(key);
+          const t = this.timers.get(key);
+          if (t) clearTimeout(t);
+          this.timers.delete(key);
+          writeWorksheetSentinel(this.armedPaths());
+        }, staleMs),
+      );
+      writeWorksheetSentinel(this.armedPaths());
     },
     clearArmed(key: string) {
-      this.paths.delete(key);
+      const remaining = (this.counts.get(key) ?? 0) - 1;
+      if (remaining > 0) {
+        // A sibling arm on this path is still in flight; keep the guard up.
+        this.counts.set(key, remaining);
+        writeWorksheetSentinel(this.armedPaths());
+        return;
+      }
+      this.counts.delete(key);
       const timer = this.timers.get(key);
       if (timer) clearTimeout(timer);
       this.timers.delete(key);
-      writeWorksheetSentinel(this.paths);
+      writeWorksheetSentinel(this.armedPaths());
     },
     reset() {
       for (const timer of this.timers.values()) clearTimeout(timer);
       this.timers.clear();
-      this.paths.clear();
-      writeWorksheetSentinel(this.paths);
+      this.counts.clear();
+      writeWorksheetSentinel(this.armedPaths());
     },
   };
 
@@ -989,6 +1021,20 @@ export default function (pi: ExtensionAPI) {
       debounceTimers.set(identity, setTimeout(() => {
         debounceTimers.delete(identity);
         if (watcherPaused) return;
+        // A guard or external lock may have armed after this event was
+        // queued (an agent write is in flight, or another process is).  Do
+        // not attribute in-flight content to the human — refresh the stored
+        // hash so a later event is compared against the right baseline.
+        if (
+          worksheetGuard.isActiveFor(identity) ||
+          hasExternalWorksheetLock(identity)
+        ) {
+          try {
+            const content = fs.readFileSync(filePath, "utf-8");
+            if (content.trim()) rememberFile(filePath, content);
+          } catch { /* raced */ }
+          return;
+        }
         try {
           const revision = recordRevision(filePath, "human");
           if (!revision) return;

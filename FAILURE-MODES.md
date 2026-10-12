@@ -115,7 +115,14 @@ storage.
   (e.g. `/var` → `/private/var` on macOS) do not desync the guard or drop
   steering. Agent writes are attributed via a content snapshot taken at
   `tool_call` time, because the in-flight hash refresh would otherwise make
-  the disarm see "no change" and drop the `actor:"agent"` audit revision.
+  the disarm see "no change" and drop the `actor:"agent"` audit revision. The
+  guard is also reference-counted per path, because pi executes tool batches
+  in parallel by default (`toolExecution: "parallel"`): without it, the first
+  `tool_execution_end` of a two-write batch would clear the guard while the
+  sibling write was still in flight, letting the watcher misattribute that
+  in-flight agent write to the human (the reverse of FM10). A debounce timer
+  re-checks the guard at fire time so a timer scheduled by a genuine human
+  edit never records an in-flight agent write.
 - **Known limitation**: a *human* edit saved inside the bash window is
   indistinguishable from the agent's own write and is suppressed (its hash is
   refreshed too). Re-save after the command finishes.
