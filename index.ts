@@ -353,13 +353,23 @@ export default function (pi: ExtensionAPI) {
    * while tool inputs and user commands give the raw path (e.g. /var vs
    * /private/var under $TMPDIR).  Both must key to the same identity or the
    * guard, the file-state hashes, and the history ids silently desync.
-   * Falls back to a plain resolve when the file does not exist yet.
+   * For not-yet-existing paths (e.g. a `write` creating a new worksheet) the
+   * deepest existing ancestor is canonicalized and the remainder re-joined,
+   * so symlinked prefixes still resolve consistently.
    */
   function canonicalPath(p: string): string {
-    try {
-      return fs.realpathSync(p);
-    } catch {
-      return path.resolve(p);
+    const resolved = path.resolve(p);
+    let dir = resolved;
+    const pending: string[] = [];
+    for (;;) {
+      try {
+        return path.join(fs.realpathSync(dir), ...pending);
+      } catch {
+        pending.unshift(path.basename(dir));
+        const parent = path.dirname(dir);
+        if (parent === dir) return resolved; // reached the root; nothing to canonicalize
+        dir = parent;
+      }
     }
   }
 
@@ -579,16 +589,32 @@ export default function (pi: ExtensionAPI) {
   /**
    * Persist the current save as an event (revision id, parent revision,
    * actor, changed sections, operation summary, conversation/turn id) and
-   * reconcile stable block identities.  Returns the human-facing change
-   * summary, or null when there is no meaningful change to surface.
+   * reconcile stable block identities.  Returns the change summary and
+   * semantics, or null when there is no meaningful change to surface.
+   *
+   * prevOverride disambiguates the agent path: the guarded-skip path
+   * refreshes the stored hash during the write window, so the agent's own
+   * write must be compared against the content captured at arm time rather
+   * than the (already refreshed) stored state.  Pass null for a new file,
+   * or the pre-write content string.
    */
-  function recordRevision(filePath: string, actor: "human" | "agent"): { changeSummary: string; semantic: string } | null {
+  function recordRevision(
+    filePath: string,
+    actor: "human" | "agent",
+    prevOverride?: string | null,
+  ): { changeSummary: string; semantic: string } | null {
     try {
       if (!fs.existsSync(filePath)) return null;
       const content = fs.readFileSync(filePath, "utf-8");
       if (!content.trim()) return null;
-      const prev = fileState.get(canonicalPath(filePath));
       const exact = fileHash(content);
+      const stored = fileState.get(canonicalPath(filePath)) ?? null;
+      const prev: FileState | null =
+        prevOverride === undefined
+          ? stored
+          : prevOverride === null
+            ? null
+            : { content: prevOverride, exact: fileHash(prevOverride), norm: normalizedHash(prevOverride) };
       if (prev && prev.exact === exact) return null; // no change
       const norm = normalizedHash(content);
       if (prev && prev.norm === norm) {
@@ -627,7 +653,16 @@ export default function (pi: ExtensionAPI) {
   }
 
   function isWorksheetPathForSession(absPath: string): boolean {
-    return isWorksheetPath(absPath, worksheetsRoot(), attachedFiles);
+    // Canonicalize both sides: tool inputs may use a different symlink form
+    // than the stored attached paths / the cwd-derived root (macOS /var vs
+    // /private/var), and exact string matching would fail to arm the guard.
+    const identity = canonicalPath(absPath);
+    const rootIdentity = canonicalPath(worksheetsRoot());
+    const relative = path.relative(rootIdentity, identity);
+    if (relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+      return true;
+    }
+    return [...attachedFiles].some((f) => canonicalPath(f) === identity);
   }
 
   // ── detect agent writes to .worksheets/ files ───────────────────────────
@@ -759,7 +794,12 @@ export default function (pi: ExtensionAPI) {
   // end event lacks the input fields.  For `write` tools we also keep the
   // expected post-write content hash so a concurrent edit that lands during
   // the write window is noticed instead of silently swallowed.
-  type ArmedInfo = { path: string; expectedHash?: string };
+  type ArmedInfo = {
+    path: string;
+    expectedHash?: string;
+    /** File content at arm time (before the tool ran); undefined = file did not exist. */
+    prevContent?: string;
+  };
   const armedPaths = new Map<string, ArmedInfo>();
 
   pi.on("tool_call", (event) => {
@@ -778,10 +818,18 @@ export default function (pi: ExtensionAPI) {
     }
     const targetPath = (args.path ?? args.file ?? "") as string;
     if (targetPath && isWorksheetPathForSession(path.resolve(targetPath))) {
+      // Capture the pre-write content so the disarm can attribute the agent's
+      // own write even though the guarded-skip path refreshes the stored hash
+      // while the write is in flight.
+      let prevContent: string | undefined;
+      try {
+        prevContent = fs.readFileSync(path.resolve(targetPath), "utf-8");
+      } catch { /* new file */ }
       const expectedContent = typeof args.content === "string" ? args.content : undefined;
       armedPaths.set(event.toolCallId, {
         path: canonicalPath(targetPath),
         expectedHash: expectedContent === undefined ? undefined : fileHash(expectedContent),
+        prevContent,
       });
       worksheetGuard.arm(targetPath);
     }
@@ -810,22 +858,25 @@ export default function (pi: ExtensionAPI) {
     }
 
     worksheetGuard.disarm(armed.path);
-    // Record the agent's own write in the audit log.  Recording is
-    // distinct from steering: we log actor "agent" but never re-inject
-    // the change as a worksheet update.  This also refreshes the stored
-    // hash, so a later spurious fs.watch event cannot re-inject it.
-    recordRevision(armed.path, "agent");
-    if (armed.expectedHash !== undefined) {
-      try {
-        const disk = fs.readFileSync(armed.path, "utf-8");
-        if (fileHash(disk) !== armed.expectedHash) {
-          pi.sendUserMessage(
-            `[Worksheet update — ${path.basename(armed.path)}] The file changed again while the agent's write was landing; the current state on disk is authoritative. Re-read the worksheet before continuing.`,
-            { deliverAs: "steer" },
-          );
-        }
-      } catch { /* raced — file may have been removed */ }
-    }
+    try {
+      const disk = fs.readFileSync(armed.path, "utf-8");
+      const agentMadeChange =
+        armed.prevContent === undefined ? disk.trim().length > 0 : disk !== armed.prevContent;
+      if (agentMadeChange) {
+        // Record the agent's own write in the audit log.  The stored hash may
+        // already reflect the write (the guarded-skip refreshes it during the
+        // window), so compare against the content captured at arm time.
+        recordRevision(armed.path, "agent", armed.prevContent === undefined ? null : armed.prevContent);
+      } else {
+        rememberFile(armed.path, disk);
+      }
+      if (armed.expectedHash !== undefined && fileHash(disk) !== armed.expectedHash) {
+        pi.sendUserMessage(
+          `[Worksheet update — ${path.basename(armed.path)}] The file changed again while the agent's write was landing; the current state on disk is authoritative. Re-read the worksheet before continuing.`,
+          { deliverAs: "steer" },
+        );
+      }
+    } catch { /* raced — file may have been removed */ }
   });
 
   // ── load skill each turn ────────────────────────────────────────────

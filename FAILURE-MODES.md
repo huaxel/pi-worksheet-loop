@@ -110,9 +110,12 @@ storage.
   the whole command window and disarms on `tool_execution_end` (300s crash
   timer). While armed, worksheet saves are skipped and the stored hash is
   refreshed, so the agent's own bash write is never re-injected. All path
-  identities (guard keys, stored hashes, history ids) are canonicalized via
-  `realpath`, so symlinked project paths (e.g. `/var` → `/private/var` on
-  macOS) do not desync the guard or drop steering.
+  identities (guard keys, stored hashes, history ids, and the arming check
+  itself) are canonicalized via `realpath`, so symlinked project paths
+  (e.g. `/var` → `/private/var` on macOS) do not desync the guard or drop
+  steering. Agent writes are attributed via a content snapshot taken at
+  `tool_call` time, because the in-flight hash refresh would otherwise make
+  the disarm see "no change" and drop the `actor:"agent"` audit revision.
 - **Known limitation**: a *human* edit saved inside the bash window is
   indistinguishable from the agent's own write and is suppressed (its hash is
   refreshed too). Re-save after the command finishes.

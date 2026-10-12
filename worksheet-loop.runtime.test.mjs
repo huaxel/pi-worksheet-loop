@@ -1,7 +1,7 @@
 // Runtime smoke test: exercises the real watch → debounce → steer loop, the
 // bash wildcard guard, and disarm-time hash behavior in a temp directory.
 // Run: node worksheet-loop.runtime.test.mjs (or npm test) — requires Node >= 22.7.
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,22 @@ const assert = (condition, message) => {
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEBOUNCE_SETTLE_MS = 900;
+
+/** Count audit-log revisions per actor for the worksheet's history sidecar. */
+function actorRevisions(wsPath) {
+  const histRoot = path.join(path.dirname(wsPath), ".history");
+  const counts = { human: 0, agent: 0 };
+  for (const sub of (existsSync(histRoot) ? readdirSync(histRoot) : [])) {
+    const ev = path.join(histRoot, sub, "events.jsonl");
+    if (!existsSync(ev)) continue;
+    for (const line of readFileSync(ev, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const actor = JSON.parse(line).actor;
+      if (actor in counts) counts[actor] += 1;
+    }
+  }
+  return counts;
+}
 
 const workdir = mkdtempSync(path.join(tmpdir(), "worksheet-runtime-"));
 const originalCwd = process.cwd();
@@ -72,16 +88,22 @@ try {
   assert(!steers[0].text.includes("Saved human changes"), "document-first pointer omits the diff");
 
   // 2. Agent write via the `write` tool: armed → write → disarm; no steer,
-  //    and the spurious post-write watch event is hash-suppressed.
+  //    an actor:"agent" revision is recorded, and the spurious post-write
+  //    watch event is hash-suppressed.  The tool input uses the CANONICAL
+  //    (symlink-resolved) path form while attach used the raw one — the guard
+  //    must arm despite the form mismatch (macOS /var vs /private/var).
   const agentContent = "# Test\n\n## Todos\n- [x] step one\n\n## Progress\n- did the thing\n- agent note\n";
+  const canonicalWs = realpathSync(wsPath);
+  assert(canonicalWs !== wsPath, "test requires a symlinked workdir (tmpdir)");
   handlers.get("tool_call")(
-    { toolName: "write", toolCallId: "w1", input: { path: wsPath, content: agentContent } },
+    { toolName: "write", toolCallId: "w1", input: { path: canonicalWs, content: agentContent } },
     baseCtx,
   );
   writeFileSync(wsPath, agentContent);
   handlers.get("tool_execution_end")({ toolName: "write", toolCallId: "w1", result: {}, isError: false }, baseCtx);
   await sleep(DEBOUNCE_SETTLE_MS);
   assert(steers.length === 1, "agent write produces no steer (got extra: %s)", steers.length);
+  assert(actorRevisions(wsPath).agent === 1, "agent write recorded as actor 'agent'");
 
   // 3. Interleave: disk differs from the expected write content at disarm →
   //    a re-read steer is sent.
@@ -96,6 +118,7 @@ try {
   await sleep(DEBOUNCE_SETTLE_MS);
   assert(steers.length === 2, `interleaved write surfaces a re-read steer (got ${steers.length})`);
   assert(steers[1].text.includes("changed again while the agent's write was landing"), "interleave steer text");
+  assert(actorRevisions(wsPath).agent === 2, "interleaved write still recorded as an agent revision");
 
   // 4. Bash guard: armed for the command window; a write inside is suppressed
   //    and the hash refreshed; after disarm a new human edit steers again.
@@ -115,6 +138,12 @@ try {
 
   // 5. Shutdown tears down watchers and timers so the process can exit.
   handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, baseCtx);
+
+  // 6. Final attribution: 2 agent revisions (write + interleave) and >=2 human
+  //    revisions (step-1 edit + post-bash edit).
+  const final = actorRevisions(wsPath);
+  assert(final.agent === 2, `expected 2 agent revisions (got ${final.agent})`);
+  assert(final.human >= 2, `expected >=2 human revisions (got ${final.human})`);
 } finally {
   process.chdir(originalCwd);
   rmSync(workdir, { recursive: true, force: true });
