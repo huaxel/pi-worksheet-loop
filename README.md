@@ -20,14 +20,30 @@ pi -e /path/to/pi-worksheet-loop/index.ts
 
 ## Releasing
 
-1. Bump `version` in `package.json` (e.g. `0.2.0`) and commit.
-2. Set the `NPM_TOKEN` repository secret (GitHub can auto-create it because
-   the npm account is linked to GitHub: repo → Settings → Secrets and
-   variables → Actions).
-3. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+Publishing uses an npm **OpenID Connect trusted publisher** — GitHub
+Actions mints a short-lived publish token at release time; no npm token is
+stored in the repo.
 
-CI runs the full gate (typecheck + tests) and publishes to npm only when the
-tag matches the package version exactly.
+One-time setup (package owner):
+
+1. Pre-create the package so the settings page exists: npmjs.com →
+   account settings → Packages → *Create package* →
+   `@juanbenjumea/pi-worksheet-loop`, access **public**.
+2. Package → **Access** → *Add trusted publisher*: owner `huaxel`,
+   repository `pi-worksheet-loop`, workflow file `ci.yml`, workflow name
+   `ci`. (Both must match `.github/workflows/ci.yml` exactly.)
+3. Recommended publishing-access setting: *Require two-factor
+   authentication and disallow bypass 2FA tokens* — OIDC uses no token,
+   so it works with the strictest option.
+
+Per release:
+
+1. Bump `version` in `package.json` (e.g. `0.2.0`) and commit.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+CI runs the full gate (typecheck + tests) and publishes to npm only when
+the tag matches the package version exactly. Tarballs carry a public
+provenance attestation linking them to the workflow run.
 
 ## Commands
 

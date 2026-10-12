@@ -30,12 +30,16 @@ jobs:
     # Only tag pushes on the default branch publish; never PRs, branches,
     # or manual runs.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      # npm OpenID Connect: the workflow mints a short-lived publish token
+      # at publish time — no NPM_TOKEN secret is stored anywhere.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
       - name: Verify tag matches package version
         run: |
           expected="v$(node -p "require('./package.json').version")"
@@ -43,8 +47,11 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match package version $expected"
             exit 1
           fi
-      - name: Publish to npm
-        # --access public: scoped packages default to private without it.
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (OIDC trusted publisher)
+        uses: npm/publish@v4
+        with:
+          # Provenance: public sigstore attestation linking the tarball to
+          # this exact workflow run.
+          provenance: public
+          # Scoped packages default to private without this.
+          access: public
