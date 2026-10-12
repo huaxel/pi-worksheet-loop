@@ -4,15 +4,17 @@ A Pi extension for Markdown-first collaboration: saved worksheet revisions steer
 
 ## Install
 
-From a Pi session:
+Install from the terminal (or `pi install ./pi-worksheet-loop` for a local path):
 
-```text
-/package install npm:@juanbenjumea/pi-worksheet-loop
+```bash
+pi install npm:@juanbenjumea/pi-worksheet-loop
 ```
 
-Or use the local package during development:
+The package is self-contained: Pi discovers the extension via the `pi.extensions` manifest entry and the root `SKILL.md` as a native skill. Note: if you also keep a separately installed `worksheet-loop` skill, the first-loaded copy wins the name and the other is reported as a collision diagnostic.
 
-```text
+For one-off development, load the source without installing:
+
+```bash
 pi -e /path/to/pi-worksheet-loop/index.ts
 ```
 

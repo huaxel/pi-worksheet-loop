@@ -5,6 +5,13 @@
   "type": "module",
   "license": "MIT",
   "author": "Juan Benjumea",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huaxel/pi-worksheet-loop.git"
+  },
+  "engines": {
+    "node": ">=22.7"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
