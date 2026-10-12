@@ -20,30 +20,30 @@ pi -e /path/to/pi-worksheet-loop/index.ts
 
 ## Releasing
 
-Publishing uses an npm **OpenID Connect trusted publisher** — GitHub
-Actions mints a short-lived publish token at release time; no npm token is
-stored in the repo.
+Publishing uses npm **OpenID Connect trusted publishing** after the initial
+bootstrap release. Subsequent GitHub Actions releases use short-lived OIDC
+authentication; no npm token is stored in the repo.
 
-One-time setup (package owner):
+One-time bootstrap (the package must exist before npm allows a trusted
+publisher to be configured):
 
-1. Pre-create the package so the settings page exists: npmjs.com →
-   account settings → Packages → *Create package* →
-   `@juanbenjumea/pi-worksheet-loop`, access **public**.
-2. Package → **Access** → *Add trusted publisher*: owner `huaxel`,
-   repository `pi-worksheet-loop`, workflow file `ci.yml`, workflow name
-   `ci`. (Both must match `.github/workflows/ci.yml` exactly.)
-3. Recommended publishing-access setting: *Require two-factor
-   authentication and disallow bypass 2FA tokens* — OIDC uses no token,
-   so it works with the strictest option.
+1. Authenticate interactively with `npm login`, then publish the initial
+   version (`npm publish --access public`). Do not add a token to the repo.
+2. On npmjs.com, open the package → **Settings / Trusted Publisher** → *Add
+   trusted publisher*: GitHub owner `huaxel`, repository `pi-worksheet-loop`,
+   workflow filename `ci.yml`. (The workflow name is `ci`; npm's current
+   GitHub setup asks for the workflow filename.) Allow **npm publish**.
+3. Make the first successful OIDC publish within two days of configuring the
+   publisher. Keep the most restrictive token-access setting; OIDC is
+   compatible and npm automatically generates provenance.
 
-Per release:
+Per subsequent release:
 
-1. Bump `version` in `package.json` (e.g. `0.2.0`) and commit.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+1. Bump `version` in `package.json` (e.g. `0.1.1`) and commit.
+2. Tag and push the matching version: `git tag v0.1.1 && git push origin v0.1.1`.
 
 CI runs the full gate (typecheck + tests) and publishes to npm only when
-the tag matches the package version exactly. Tarballs carry a public
-provenance attestation linking them to the workflow run.
+the tag matches the package version exactly.
 
 ## Commands
 
